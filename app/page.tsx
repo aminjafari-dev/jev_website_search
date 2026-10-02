@@ -1,23 +1,21 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
-
-type SearchMatch = {
-  id: string;
-  name: string;
-  category: string;
-  price: number;
-  description: string;
-  tone: string;
-  relevance: number;
-  rank: number;
-};
+import { JevSettingsPanel } from "@/components/JevSettingsPanel";
+import { products, type Product } from "@/data/products";
+import { applySearchFilters, type SearchMatch } from "@/lib/ranking";
+import {
+  DEFAULT_SEARCH_SETTINGS,
+  type SearchSettings,
+} from "@/lib/settings";
+import { useMemo, useState, type FormEvent } from "react";
 
 type SearchResponse = {
   query: string;
+  scored: SearchMatch[];
   matches: SearchMatch[];
   hasMatch: number;
   model: string;
+  settings: SearchSettings;
   usage?: {
     input_tokens: number;
     output_tokens: number;
@@ -44,11 +42,79 @@ function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
+function productInitials(name: string) {
+  return name
+    .split(" ")
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join("");
+}
+
+function ProductCard({
+  product,
+  relevance,
+  delayMs = 0,
+}: {
+  product: Product;
+  relevance?: number;
+  delayMs?: number;
+}) {
+  return (
+    <article
+      className="product-card"
+      style={{ animationDelay: `${delayMs}ms` }}
+    >
+      <div
+        className="product-visual"
+        style={{ background: product.tone }}
+        aria-hidden
+      >
+        {typeof relevance === "number" && (
+          <span className="match-badge">{formatPercent(relevance)} match</span>
+        )}
+        {productInitials(product.name)}
+      </div>
+      <div className="product-body">
+        <p className="product-category">{product.category}</p>
+        <h3 className="product-name">{product.name}</h3>
+        <p className="product-desc">{product.description}</p>
+        <div className="product-footer">
+          <span className="product-price">{formatPrice(product.price)}</span>
+          {typeof relevance === "number" ? (
+            <div
+              className="relevance-bar"
+              title={`Relevance ${formatPercent(relevance)}`}
+            >
+              <div
+                className="relevance-fill"
+                style={{ width: `${Math.max(relevance * 100, 8)}%` }}
+              />
+            </div>
+          ) : (
+            <span className="product-id">{product.id}</span>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
 export default function HomePage() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SearchResponse | null>(null);
+  const [settings, setSettings] = useState<SearchSettings>(DEFAULT_SEARCH_SETTINGS);
+
+  const visibleMatches = useMemo(() => {
+    if (!result?.scored?.length) return [];
+    return applySearchFilters(result.scored, settings);
+  }, [result, settings.minRelevance, settings.maxResults]);
+
+  const needsResearch =
+    !!result &&
+    (result.settings.strictness !== settings.strictness ||
+      result.settings.model !== settings.model);
 
   async function runSearch(nextQuery: string) {
     const trimmed = nextQuery.trim();
@@ -62,7 +128,7 @@ export default function HomePage() {
       const response = await fetch("/api/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: trimmed }),
+        body: JSON.stringify({ query: trimmed, settings }),
       });
       const data = (await response.json()) as SearchResponse;
       if (!response.ok) {
@@ -82,6 +148,8 @@ export default function HomePage() {
     void runSearch(query);
   }
 
+  const categories = [...new Set(products.map((product) => product.category))];
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -89,8 +157,23 @@ export default function HomePage() {
           <span className="brand-mark" aria-hidden />
           <span className="brand-name">Shelf</span>
         </a>
-        <p className="brand-meta">Product search with Jev</p>
+        <nav className="topbar-nav">
+          <a className="topbar-link" href="#settings">
+            Jev settings
+          </a>
+          <a className="topbar-link" href="#catalog">
+            All products ({products.length})
+          </a>
+        </nav>
       </header>
+
+      <div id="settings">
+        <JevSettingsPanel
+          settings={settings}
+          onChange={setSettings}
+          disabled={loading}
+        />
+      </div>
 
       <section className="hero" aria-label="Search">
         <h1 className="hero-brand">Shelf</h1>
@@ -139,68 +222,51 @@ export default function HomePage() {
 
         {error && <div className="error-card">{error}</div>}
 
+        {!loading && needsResearch && (
+          <div className="status-card settings-notice">
+            Model or strictness changed.{" "}
+            <button
+              type="button"
+              className="inline-action"
+              onClick={() => void runSearch(result.query)}
+            >
+              Re-run search
+            </button>{" "}
+            to apply those Jev settings. Min relevance and max results update
+            instantly.
+          </div>
+        )}
+
         {!loading && result && (
           <>
             <div className="results-header">
               <h2>
-                {result.matches.length > 0
+                {visibleMatches.length > 0
                   ? "Matched products"
                   : "No strong matches"}
               </h2>
               <p className="results-meta">
-                {result.matches.length > 0
-                  ? `${result.matches.length} picks · match confidence ${formatPercent(result.hasMatch)} · ${result.model}`
-                  : `Jev found little overlap (${formatPercent(result.hasMatch)}) · ${result.model}`}
+                {visibleMatches.length > 0
+                  ? `${visibleMatches.length} shown · threshold ${formatPercent(settings.minRelevance)} · ${result.model}`
+                  : `Nothing above ${formatPercent(settings.minRelevance)} · top score ${formatPercent(result.hasMatch)} · ${result.model}`}
               </p>
             </div>
 
-            {result.matches.length === 0 ? (
+            {visibleMatches.length === 0 ? (
               <div className="empty-card">
-                Nothing in this catalog fits “{result.query}” well enough. Try a
-                different need, or broaden the request.
+                Nothing in this catalog clears your current threshold for “
+                {result.query}”. Lower min relevance, loosen strictness, or
+                broaden the request.
               </div>
             ) : (
               <div className="product-grid">
-                {result.matches.map((product, index) => (
-                  <article
+                {visibleMatches.map((product, index) => (
+                  <ProductCard
                     key={product.id}
-                    className="product-card"
-                    style={{ animationDelay: `${index * 70}ms` }}
-                  >
-                    <div
-                      className="product-visual"
-                      style={{ background: product.tone }}
-                      aria-hidden
-                    >
-                      <span className="match-badge">
-                        {formatPercent(product.relevance)} match
-                      </span>
-                      {product.name
-                        .split(" ")
-                        .slice(0, 2)
-                        .map((part) => part[0])
-                        .join("")}
-                    </div>
-                    <div className="product-body">
-                      <p className="product-category">{product.category}</p>
-                      <h3 className="product-name">{product.name}</h3>
-                      <p className="product-desc">{product.description}</p>
-                      <div className="product-footer">
-                        <span className="product-price">
-                          {formatPrice(product.price)}
-                        </span>
-                        <div
-                          className="relevance-bar"
-                          title={`Relevance ${formatPercent(product.relevance)}`}
-                        >
-                          <div
-                            className="relevance-fill"
-                            style={{ width: `${Math.max(product.relevance * 100, 8)}%` }}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </article>
+                    product={product}
+                    relevance={product.relevance}
+                    delayMs={index * 70}
+                  />
                 ))}
               </div>
             )}
@@ -208,8 +274,35 @@ export default function HomePage() {
         )}
       </section>
 
+      <section className="catalog" id="catalog">
+        <div className="results-header">
+          <h2>All products</h2>
+          <p className="results-meta">
+            {products.length} items · {categories.length} categories
+          </p>
+        </div>
+
+        <div className="category-list" aria-label="Categories">
+          {categories.map((category) => (
+            <span key={category} className="category-pill">
+              {category}
+            </span>
+          ))}
+        </div>
+
+        <div className="product-grid">
+          {products.map((product, index) => (
+            <ProductCard
+              key={product.id}
+              product={product}
+              delayMs={Math.min(index * 30, 400)}
+            />
+          ))}
+        </div>
+      </section>
+
       <p className="catalog-note">
-        Demo catalog: 36 products. Search uses TypeSafe Jev (one{" "}
+        Demo catalog: {products.length} products. Search uses TypeSafe Jev (one{" "}
         <code>Noul</code> relevance score per product, scored in parallel) so
         results stay tied to your inventory—no hallucinated items.
       </p>
